@@ -1,0 +1,149 @@
+name: 🚀 Daily Vibe App Deploy
+
+on:
+  # Run automatically every day at 6:00 AM IST (00:30 UTC)
+  schedule:
+    - cron: '30 0 * * *'
+
+  # Also allow manual trigger with custom day number
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'Day number to deploy (1-30). Leave empty for auto.'
+        required: false
+        type: string
+      force_regenerate:
+        description: 'Force regenerate code even if app exists'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      # ── 1. Checkout repo ───────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Setup Node ──────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'scripts/package.json'
+
+      # ── 3. Install script deps ─────────────────────────────────────────
+      - name: Install pipeline dependencies
+        working-directory: scripts
+        run: npm ci
+
+      # ── 4. Determine today's day number ───────────────────────────────
+      - name: Determine day number
+        id: day
+        run: |
+          if [ -n "${{ github.event.inputs.day }}" ]; then
+            DAY="${{ github.event.inputs.day }}"
+          else
+            # Calculate based on SPRINT_START_DATE secret (format: YYYY-MM-DD)
+            START="${{ secrets.SPRINT_START_DATE }}"
+            if [ -z "$START" ]; then
+              echo "⚠️  SPRINT_START_DATE secret not set. Defaulting to Day 1."
+              DAY=1
+            else
+              TODAY=$(date -u +%Y-%m-%d)
+              DIFF=$(( ( $(date -d "$TODAY" +%s) - $(date -d "$START" +%s) ) / 86400 + 1 ))
+              if [ $DIFF -lt 1 ]; then DAY=1
+              elif [ $DIFF -gt 30 ]; then DAY=30
+              else DAY=$DIFF
+              fi
+            fi
+          fi
+          echo "day=$DAY" >> $GITHUB_OUTPUT
+          echo "🗓️  Building Day $DAY"
+
+      # ── 5. Generate app with Claude API ───────────────────────────────
+      - name: Generate app code via Claude
+        working-directory: scripts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DAY: ${{ steps.day.outputs.day }}
+          FORCE_REGENERATE: ${{ github.event.inputs.force_regenerate }}
+        run: node generate-app.js
+
+      # ── 6. Build the generated app ─────────────────────────────────────
+      - name: Build Vite app
+        working-directory: scripts
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+        run: node build-app.js
+
+      # ── 7. Update deployments log ──────────────────────────────────────
+      - name: Update deployments.md
+        working-directory: scripts
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node update-log.js
+
+      # ── 8. Commit generated app source + log back to repo ─────────────
+      - name: Commit app source
+        run: |
+          git config user.name "Vibe Bot 🤖"
+          git config user.email "vibe-bot@users.noreply.github.com"
+          git add apps/ deployments.md
+          git diff --staged --quiet || git commit -m "🚀 Day ${{ steps.day.outputs.day }}: $(node -e "const a=require('./apps-config/apps.json');const d=process.env.DAY;console.log(a.find(x=>x.day==d)?.name||'')" 2>/dev/null)"
+          git push
+
+      # ── 9. Deploy to GitHub Pages ──────────────────────────────────────
+      - name: Prepare Pages root
+        run: |
+          mkdir -p gh-pages-root
+          # Copy the portal index (links to all apps)
+          cp portal/index.html gh-pages-root/index.html 2>/dev/null || echo "<h1>Vibe Sprint</h1>" > gh-pages-root/index.html
+          # Copy each built app into its own subfolder
+          for dir in dist/*/; do
+            slug=$(basename "$dir")
+            mkdir -p gh-pages-root/$slug
+            cp -r $dir* gh-pages-root/$slug/
+          done
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: gh-pages-root
+
+      - name: Deploy to GitHub Pages
+        id: pages-deploy
+        uses: actions/deploy-pages@v4
+
+      # ── 10. Print summary ──────────────────────────────────────────────
+      - name: Print deploy summary
+        run: |
+          REPO="${{ github.repository }}"
+          OWNER=$(echo $REPO | cut -d/ -f1)
+          REPONAME=$(echo $REPO | cut -d/ -f2)
+          DAY="${{ steps.day.outputs.day }}"
+          APP=$(node -e "const a=require('./apps-config/apps.json');console.log(a.find(x=>x.day==$DAY)?.name||'')" 2>/dev/null)
+          SLUG=$(node -e "const a=require('./apps-config/apps.json');console.log(a.find(x=>x.day==$DAY)?.slug||'')" 2>/dev/null)
+          URL="https://${OWNER}.github.io/${REPONAME}/${SLUG}/"
+          echo ""
+          echo "✅ Day $DAY deployed!"
+          echo "📦 App: $APP"
+          echo "🌐 URL: $URL"
+          echo ""
+          echo "### 🚀 Deployment complete" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Day | $DAY |" >> $GITHUB_STEP_SUMMARY
+          echo "| App | $APP |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | [$URL]($URL) |" >> $GITHUB_STEP_SUMMARY

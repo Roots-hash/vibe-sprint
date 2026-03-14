@@ -1,0 +1,15 @@
+{
+  "name": "vibe-sprint-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pipeline scripts for the 30-day vibe code sprint",
+  "scripts": {
+    "generate": "node generate-app.js",
+    "build":    "node build-app.js",
+    "log":      "node update-log.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "fs-extra":          "^11.2.0"
+  }
+}
